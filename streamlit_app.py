@@ -15,14 +15,18 @@ OCR_API_KEY = "K81706642488957"
 
 st.set_page_config(page_title="Shift Bot Server", page_icon="🗓")
 st.title("Telegram Shift Bot Server")
-st.write("Статус: Бот запущен. Если данные считываются неверно, убедитесь, что фото четкое.")
+st.write("Статус: Бот активен. Выходные — зеленые, работа — оранжевая.")
 
 def create_calendar_visual(surname, raw_line):
+    # Месяц Май 2026
     year, month = 2026, 5
+    
     img_w, img_h = 1000, 1100
+    img = Image.new('RGB', (33, 37, 43), color=(33, 37, 43))
     img = Image.new('RGB', (img_w, img_h), color=(33, 37, 43))
     d = ImageDraw.Draw(img)
     
+    # Заголовки
     d.text((430, 40), "МАЙ 2026", fill=(255, 255, 255))
     d.text((60, 100), f"СОТРУДНИК: {surname.upper()}", fill=(200, 200, 200))
 
@@ -33,13 +37,13 @@ def create_calendar_visual(surname, raw_line):
     for i, day in enumerate(days_ru):
         d.text((start_x + i * cell_size + 40, start_y - 50), day, fill=(150, 150, 150))
 
-    # УЛУЧШЕННЫЙ ПАРСИНГ: находим все смены или "ОТ" в строке
-    # Ищем шаблоны вида "09-22", "10-21", "9:00-18", "ОТ"
-    found_data = re.findall(r'(\d{1,2}[:\-\s]*\d{0,2}|ОТ)', raw_line)
+    # ПАРСИНГ: Ищем временные интервалы (09-21, 10:00-22) или "ОТ"
+    # Убираем саму фамилию из начала строки, чтобы не путать буквы с данными
+    content = raw_line.lower().replace(surname.lower(), "", 1)
+    found_data = re.findall(r'(\d{1,2}[:\-\s]*\d{0,2}|от)', content)
     
-    # Пытаемся отсечь цифры, которые могут относиться к фамилии или должностям
-    # Обычно данные смен начинаются после длинного пропуска или фамилии
-    clean_data = found_data[-31:] if len(found_data) > 31 else found_data
+    # Берем последние 31 значение, так как это данные по дням месяца
+    clean_data = found_data if len(found_data) <= 31 else found_data[:31]
 
     cal_structure = calendar.monthcalendar(year, month)
     
@@ -50,28 +54,30 @@ def create_calendar_visual(surname, raw_line):
             x = start_x + c_idx * cell_size
             y = start_y + r_idx * (cell_size + 15)
             
-            # ЦВЕТА: По умолчанию выходной - ЗЕЛЕНЫЙ
-            bg_color = (60, 140, 85) 
+            # ЦВЕТА: Выходной - ЗЕЛЕНЫЙ, Работа - ОРАНЖЕВЫЙ
+            bg_color = (60, 140, 85) # Зеленый
             shift_info = ""
 
             if (day_num - 1) < len(clean_data):
-                val = clean_data[day_num - 1]
-                if "ОТ" in val.upper():
-                    bg_color = (180, 70, 70) 
+                val = clean_data[day_num - 1].strip()
+                if "от" in val:
+                    bg_color = (180, 70, 70) # Отпуск
                     shift_info = "ОТПУСК"
-                elif re.search(r'\d', val) and len(val) > 1: # Игнорируем одиночные цифры-мусор
-                    bg_color = (255, 140, 0) # Работа - ОРАНЖЕВЫЙ
+                elif re.search(r'\d', val) and len(val) >= 2:
+                    bg_color = (255, 140, 0) # Оранжевый
                     shift_info = val.replace(" ", "")
 
+            # Рисуем ячейку календаря
             d.rectangle([x, y, x + cell_size - 12, y + cell_size - 12], fill=bg_color)
             d.text((x + 10, y + 10), str(day_num), fill=(255, 255, 255))
             
+            # Время работы внутри ячейки
             if shift_info:
-                txt = f"с {shift_info}" if len(shift_info) < 6 else shift_info
+                display_text = f"с {shift_info}" if "ОТ" not in shift_info else shift_info
                 tx, ty = x + 15, y + 55
-                for off_x in range(2):
+                for off_x in range(2): # Эффект жирного текста
                     for off_y in range(2):
-                        d.text((tx + off_x, ty + off_y), txt, fill=(255, 255, 255))
+                        d.text((tx + off_x, ty + off_y), display_text, fill=(255, 255, 255))
 
     buf = io.BytesIO()
     img.save(buf, format='PNG')
@@ -80,8 +86,9 @@ def create_calendar_visual(surname, raw_line):
 
 async def get_ocr_result(image_bytes, surname):
     try:
+        # Оптимизация изображения для OCR
         img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-        img.thumbnail((2500, 2500)) # Увеличили разрешение для лучшего OCR
+        img.thumbnail((2500, 2500))
         c_buf = io.BytesIO()
         img.save(c_buf, format='JPEG', quality=100)
 
@@ -98,32 +105,32 @@ async def get_ocr_result(image_bytes, surname):
         
         target = surname.strip().lower()
         for line in lines:
-            # Ищем фамилию в строке
             if target in line.lower():
                 return create_calendar_visual(surname, line)
         
-        return f"Сотрудник {surname} не найден в таблице."
+        return f"Сотрудник '{surname}' не найден. Проверьте правильность написания."
     except Exception as e:
-        return f"Ошибка системы: {str(e)}"
+        return f"Системная ошибка: {str(e)}"
 
+# --- ТЕЛЕГРАМ БОТ ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("🗓 Пришлите четкое фото графика и фамилию в подписи.")
+    await message.answer("🗓 Пришлите фото таблицы и укажите фамилию в подписи.")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     if not message.caption:
-        await message.answer("⚠️ Напишите фамилию в описании к фото!")
+        await message.answer("⚠️ Пожалуйста, напишите фамилию в описании к фотографии!")
         return
     
     surname = message.caption.strip()
-    wait_msg = await message.answer(f"⏳ Считываю данные для: {surname}...")
+    wait_msg = await message.answer(f"⏳ Формирую личный календарь для: {surname}...")
     
     file = await bot.get_file(message.photo[-1].file_id)
-    photo_file = await bot.download_file(file.file_path)
+    photo_file = await bot.download_file(file.path if hasattr(file, 'path') else file.file_path)
     
     result = await get_ocr_result(photo_file.read(), surname)
     await wait_msg.delete()
@@ -133,14 +140,15 @@ async def handle_photo(message: types.Message):
     else:
         await message.answer(result)
 
+# --- ФОНОВЫЙ ЗАПУСК ---
 def run_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        # Исправление ошибки из логов
+        # handle_signals=False исправляет ошибку запуска в Streamlit
         loop.run_until_complete(dp.start_polling(bot, skip_updates=True, handle_signals=False))
     except Exception as e:
-        print(f"Поток остановлен: {e}")
+        print(f"Бот остановлен: {e}")
 
 if "bot_started" not in st.session_state:
     st.session_state.bot_started = True
