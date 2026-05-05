@@ -10,70 +10,70 @@ API_KEY = 'K81706642488957'
 st.title("📅 Умный Календарь Смен")
 
 surname = st.text_input("Введите фамилию", placeholder="Например: Москвичева")
-uploaded_file = st.file_uploader("Загрузите фото графика", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("Загрузите фото (лучше скриншот)", type=["jpg", "jpeg", "png"])
 
 if st.button("Создать календарь") and uploaded_file and surname:
-    with st.spinner("Анализирую структуру таблицы..."):
-        files = {"filename": uploaded_file.getvalue()}
-        data = {"apikey": API_KEY, "language": "rus", "isTable": True, "OCREngine": 2}
+    with st.spinner("Связываюсь с сервером распознавания..."):
+        img_bytes = uploaded_file.getvalue()
         
-        try:
-            res = requests.post("https://api.ocr.space/parse/image", files=files, data=data, timeout=60)
-            result = res.json()
+        # Проверка размера (OCR.space Free любит файлы до 1-2мб)
+        if len(img_bytes) > 1024 * 1024 * 5:
+            st.error("⚠️ Файл слишком большой. Сделайте скриншот фото и загрузите его.")
+        else:
+            files = {"filename": ("image.jpg", img_bytes, "image/jpeg")}
+            data = {
+                "apikey": API_KEY,
+                "language": "rus",
+                "isTable": True,
+                "OCREngine": 2 # Движок №2 лучше видит таблицы
+            }
+            
+            try:
+                res = requests.post("https://api.ocr.space/parse/image", files=files, data=data, timeout=60)
+                result = res.json()
 
-            if result.get("OCRExitCode") == 1:
-                text = result["ParsedResults"][0]["ParsedText"]
-                lines = text.split('\r\n')
-                
-                # 1. Пытаемся найти строку с датами (1 2 3 ... 31)
-                days_row = []
-                for line in lines:
-                    nums = re.findall(r'\b\d{1,2}\b', line)
-                    if len(nums) > 20: # Если в строке больше 20 чисел, это шапка дат
-                        days_row = nums
-                        break
-
-                c = Calendar()
-                found_person = False
-                
-                for line in lines:
-                    if surname.lower() in line.lower():
-                        found_person = True
-                        # Разбиваем строку по табуляции или двойным пробелам (как делает OCR для таблиц)
-                        parts = re.split(r'\t| {2,}', line)
-                        
-                        # Убираем фамилию из списка данных
-                        data_parts = [p for p in parts if surname.lower() not in p.lower() and not p.isalpha()]
-                        
-                        # Сопоставляем данные с днями месяца
-                        # Мы идем по строке и ищем смены типа "11-22"
-                        current_day = 1
-                        for part in data_parts:
-                            # Если это смена (содержит дефис)
-                            if '-' in part and any(char.isdigit() for char in part):
+                if result.get("OCRExitCode") == 1:
+                    text = result["ParsedResults"][0]["ParsedText"]
+                    lines = text.split('\r\n')
+                    
+                    c = Calendar()
+                    found_person = False
+                    
+                    for line in lines:
+                        if surname.lower() in line.lower():
+                            found_person = True
+                            # Извлекаем все смены типа 11-22 или 09-21
+                            shifts = re.findall(r'\d{1,2}[:.-]\d{2}', line)
+                            
+                            # ВАЖНО: Если OCR схлопнул пустые ячейки, 
+                            # мы пока просто выводим их по порядку
+                            for i, shift in enumerate(shifts):
                                 try:
-                                    t_start = part.split('-')[0].strip().replace('.', ':')
-                                    if ':' not in t_start: t_start += ":00"
+                                    t_start = shift.split('-')[0].split(':')[0].split('.')[0]
+                                    if len(t_start) == 1: t_start = "0" + t_start
                                     
                                     e = Event(name=f"Смена: {surname}")
-                                    # Пытаемся понять, в какой "колонке" мы находимся
-                                    # Если OCR пропустил ячейку, это слабое место, но мы ориентируемся на порядковый номер
-                                    e.begin = datetime.strptime(f"2026-05-{current_day:02d} {t_start}", "%Y-%m-%d %H:%M")
-                                    e.duration = {"hours": 12}
+                                    # Временный костыль: ставим смену на i+1 день
+                                    e.begin = datetime.strptime(f"2026-05-{i+1:02d} {t_start}:00", "%Y-%m-%d %H:%M")
+                                    e.duration = {"hours": 11}
                                     c.events.add(e)
                                 except: pass
-                            
-                            # Важный момент: если в ячейке просто пробел или "ОТ", мы все равно считаем день
-                            current_day += 1
-                
-                if found_person and len(c.events) > 0:
-                    st.success(f"Готово! Найдено смен: {len(c.events)}")
-                    st.download_button("📥 Скачать .ics", str(c), f"{surname}.ics")
+                    
+                    if found_person and len(c.events) > 0:
+                        st.success(f"Найдено смен: {len(c.events)}")
+                        st.download_button("📥 Скачать .ics", str(c), f"{surname}.ics")
+                    else:
+                        st.error(f"Фамилия '{surname}' не найдена или смены не считались.")
+                        with st.expander("Посмотреть что прочитал робот"):
+                            st.text(text)
                 else:
-                    st.error("Не удалось точно сопоставить смены. Попробуйте обрезать фото, оставив только шапку с числами и вашу строку.")
-                    with st.expander("Что увидел робот:"):
-                        st.text(text)
-            else:
-                st.error("Ошибка API. Попробуйте еще раз.")
-        except Exception as e:
-            st.error(f"Ошибка: {e}")
+                    # Выводим реальную причину ошибки от сервера
+                    details = result.get("ErrorMessage", "Неизвестная ошибка")
+                    st.error(f"Ошибка API: {details}")
+                    if "Timed out" in str(details):
+                        st.info("Попробуйте еще раз, сервер был перегружен.")
+
+            except Exception as e:
+                st.error(f"Ошибка соединения: {e}")
+
+st.info("💡 Лайфхак: если даты сбиваются, обрежьте фото так, чтобы остались только шапка с числами и ваша фамилия.")
