@@ -13,20 +13,16 @@ from PIL import Image, ImageDraw
 TOKEN = "8646138607:AAFSSiamq4LQ3TWBOnxw5izNRDZkjgFusCY"
 OCR_API_KEY = "K81706642488957"
 
-# Интерфейс Streamlit
 st.set_page_config(page_title="Shift Bot Server", page_icon="🗓")
 st.title("Telegram Shift Bot Server")
-st.write("Статус: Бот запущен и ожидает сообщений в Telegram.")
+st.write("Статус: Бот запущен. Если данные считываются неверно, убедитесь, что фото четкое.")
 
 def create_calendar_visual(surname, raw_line):
-    # Месяц: Май 2026
     year, month = 2026, 5
-    
     img_w, img_h = 1000, 1100
     img = Image.new('RGB', (img_w, img_h), color=(33, 37, 43))
     d = ImageDraw.Draw(img)
     
-    # Заголовки
     d.text((430, 40), "МАЙ 2026", fill=(255, 255, 255))
     d.text((60, 100), f"СОТРУДНИК: {surname.upper()}", fill=(200, 200, 200))
 
@@ -37,9 +33,13 @@ def create_calendar_visual(surname, raw_line):
     for i, day in enumerate(days_ru):
         d.text((start_x + i * cell_size + 40, start_y - 50), day, fill=(150, 150, 150))
 
-    # Извлекаем данные после фамилии
-    parts = re.findall(r'(\d{1,2}[:\-\s]*\d{0,2}|ОТ)', raw_line[len(surname):])
-    clean_data = [x.strip() for x in parts if x.strip()]
+    # УЛУЧШЕННЫЙ ПАРСИНГ: находим все смены или "ОТ" в строке
+    # Ищем шаблоны вида "09-22", "10-21", "9:00-18", "ОТ"
+    found_data = re.findall(r'(\d{1,2}[:\-\s]*\d{0,2}|ОТ)', raw_line)
+    
+    # Пытаемся отсечь цифры, которые могут относиться к фамилии или должностям
+    # Обычно данные смен начинаются после длинного пропуска или фамилии
+    clean_data = found_data[-31:] if len(found_data) > 31 else found_data
 
     cal_structure = calendar.monthcalendar(year, month)
     
@@ -50,16 +50,16 @@ def create_calendar_visual(surname, raw_line):
             x = start_x + c_idx * cell_size
             y = start_y + r_idx * (cell_size + 15)
             
-            # По умолчанию выходной - ЗЕЛЕНЫЙ
+            # ЦВЕТА: По умолчанию выходной - ЗЕЛЕНЫЙ
             bg_color = (60, 140, 85) 
             shift_info = ""
 
             if (day_num - 1) < len(clean_data):
                 val = clean_data[day_num - 1]
                 if "ОТ" in val.upper():
-                    bg_color = (180, 70, 70) # Отпуск
+                    bg_color = (180, 70, 70) 
                     shift_info = "ОТПУСК"
-                elif re.search(r'\d', val):
+                elif re.search(r'\d', val) and len(val) > 1: # Игнорируем одиночные цифры-мусор
                     bg_color = (255, 140, 0) # Работа - ОРАНЖЕВЫЙ
                     shift_info = val.replace(" ", "")
 
@@ -81,9 +81,9 @@ def create_calendar_visual(surname, raw_line):
 async def get_ocr_result(image_bytes, surname):
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-        img.thumbnail((2000, 2000))
+        img.thumbnail((2500, 2500)) # Увеличили разрешение для лучшего OCR
         c_buf = io.BytesIO()
-        img.save(c_buf, format='JPEG', quality=95)
+        img.save(c_buf, format='JPEG', quality=100)
 
         payload = {'apikey': OCR_API_KEY, 'language': 'rus', 'isTable': 'true', 'OCREngine': '2'}
         files = {'file': ('img.jpg', c_buf.getvalue(), 'image/jpeg')}
@@ -91,36 +91,36 @@ async def get_ocr_result(image_bytes, surname):
         r = requests.post('https://api.ocr.space/parse/image', files=files, data=payload, timeout=60).json()
         
         if r.get('OCRExitCode') != 1:
-            return f"Ошибка OCR: {r.get('ErrorMessage')}"
+            return f"Ошибка распознавания: {r.get('ErrorMessage')}"
 
         parsed_text = r['ParsedResults'][0]['ParsedText']
         lines = parsed_text.split('\r\n')
         
         target = surname.strip().lower()
         for line in lines:
+            # Ищем фамилию в строке
             if target in line.lower():
                 return create_calendar_visual(surname, line)
         
-        return f"Сотрудник {surname} не найден."
+        return f"Сотрудник {surname} не найден в таблице."
     except Exception as e:
-        return f"Ошибка: {str(e)}"
+        return f"Ошибка системы: {str(e)}"
 
-# --- ИНИЦИАЛИЗАЦИЯ БОТА ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("🗓 Привет! Пришли фото графика и напиши фамилию в подписи.")
+    await message.answer("🗓 Пришлите четкое фото графика и фамилию в подписи.")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     if not message.caption:
-        await message.answer("⚠️ Пожалуйста, напиши фамилию в описании к фото!")
+        await message.answer("⚠️ Напишите фамилию в описании к фото!")
         return
     
     surname = message.caption.strip()
-    wait_msg = await message.answer(f"⏳ Генерирую календарь для {surname}...")
+    wait_msg = await message.answer(f"⏳ Считываю данные для: {surname}...")
     
     file = await bot.get_file(message.photo[-1].file_id)
     photo_file = await bot.download_file(file.file_path)
@@ -133,15 +133,14 @@ async def handle_photo(message: types.Message):
     else:
         await message.answer(result)
 
-# --- ЗАПУСК В ФОНЕ ---
 def run_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        # handle_signals=False критично для работы в потоке внутри Streamlit
+        # Исправление ошибки из логов
         loop.run_until_complete(dp.start_polling(bot, skip_updates=True, handle_signals=False))
     except Exception as e:
-        print(f"Ошибка в потоке бота: {e}")
+        print(f"Поток остановлен: {e}")
 
 if "bot_started" not in st.session_state:
     st.session_state.bot_started = True
