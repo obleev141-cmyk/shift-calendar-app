@@ -14,9 +14,9 @@ TOKEN = "8646138607:AAFSSiamq4LQ3TWBOnxw5izNRDZkjgFusCY"
 OCR_API_KEY = "K81706642488957"
 
 st.set_page_config(page_title="Shift Bot", page_icon="🗓")
-st.title("Telegram Calendar Bot")
+st.title("Telegram Calendar Bot v3.0")
 
-def create_calendar_visual(surname, days_data):
+def create_calendar_visual(surname, days_dict):
     year, month = 2026, 5
     img_w, img_h = 1000, 1100
     img = Image.new('RGB', (img_w, img_h), color=(33, 37, 43))
@@ -34,7 +34,6 @@ def create_calendar_visual(surname, days_data):
 
     cal = calendar.monthcalendar(year, month)
     
-    # Мы ожидаем, что в days_data ровно 31 элемент
     for r_idx, week in enumerate(cal):
         for c_idx, day_num in enumerate(week):
             if day_num == 0: continue
@@ -42,19 +41,18 @@ def create_calendar_visual(surname, days_data):
             x = start_x + c_idx * cell_size
             y = start_y + r_idx * (cell_size + 15)
             
-            # Логика цвета: по умолчанию ЗЕЛЕНЫЙ (выходной)
+            # По умолчанию ЗЕЛЕНЫЙ (выходной)
             bg_color = (60, 140, 85) 
             shift_info = ""
 
-            # Проверяем данные конкретно для этого числа
-            if day_num <= len(days_data):
-                val = str(days_data[day_num-1]).strip().lower()
-                if any(x in val for x in ["от", "отп"]):
-                    bg_color = (180, 70, 70) # Красный
+            # Если для этого числа (день месяца) мы нашли текст в строке
+            if day_num in days_dict:
+                val = days_dict[day_num].lower()
+                if any(k in val for k in ["от", "отп"]):
+                    bg_color = (180, 70, 70)
                     shift_info = "ОТПУСК"
                 elif re.search(r'\d', val):
-                    bg_color = (255, 140, 0) # ОРАНЖЕВЫЙ (работа)
-                    # Чистим время от лишних букв, оставляем цифры и тире
+                    bg_color = (255, 140, 0) # ОРАНЖЕВЫЙ
                     shift_info = "".join(re.findall(r'[\d\-\:]+', val))
 
             d.rectangle([x, y, x + cell_size - 12, y + cell_size - 12], fill=bg_color)
@@ -72,38 +70,76 @@ def create_calendar_visual(surname, days_data):
     buf.seek(0)
     return buf
 
-async def process_ocr_table(image_bytes, surname):
+async def process_advanced_ocr(image_bytes, surname):
     try:
-        payload = {'apikey': OCR_API_KEY, 'language': 'rus', 'isTable': 'true', 'OCREngine': '2'}
+        # Включаем overlay, чтобы получить координаты слов
+        payload = {
+            'apikey': OCR_API_KEY, 
+            'language': 'rus', 
+            'isTable': 'true', 
+            'isOverlayRequired': 'true',
+            'OCREngine': '2'
+        }
         files = {'file': ('img.jpg', image_bytes, 'image/jpeg')}
         r = requests.post('https://api.ocr.space/parse/image', files=files, data=payload, timeout=60).json()
         
-        if r.get('OCRExitCode') != 1: return "Ошибка чтения таблицы."
+        if r.get('OCRExitCode') != 1: return "Ошибка OCR."
 
-        # Разбор таблицы по ячейкам
-        lines = r['ParsedResults'][0]['ParsedText'].split('\r\n')
-        target = surname.lower().strip()
+        results = r['ParsedResults'][0]
+        lines = results['TextOverlay']['Lines']
         
-        for line in lines:
-            # Разбиваем строку по табуляции (так OCR отдает ячейки таблицы)
-            cells = line.split('\t')
-            if any(target in c.lower() for c in cells):
-                # Нашли строку! Теперь берем всё, что идет после фамилии
-                # Мы ищем только те ячейки, где есть данные (смены)
-                schedule_cells = cells[1:] # Пропускаем ячейку с фамилией
-                return create_calendar_visual(surname, schedule_cells)
+        target_line = None
+        target_surname = surname.lower().strip()
 
-        return f"Сотрудник {surname} не найден."
+        # 1. Ищем строку, где есть фамилия
+        for line in lines:
+            line_text = "".join([w['WordText'] for w in line['Words']]).lower()
+            if target_surname in line_text:
+                target_line = line
+                break
+        
+        if not target_line:
+            return f"Сотрудник {surname} не найден."
+
+        # 2. Анализируем координаты ячеек
+        # Определяем границы таблицы по заголовку (датам 1-31)
+        # Но для простоты: распределяем слова по X-координате
+        words = target_line['Words']
+        
+        # Находим самую левую координату (после фамилии) и самую правую
+        # Считаем, что в таблице 32 колонки (Фамилия + 31 день)
+        # Это грубый расчет, но он лучше, чем просто список слов
+        
+        days_dict = {}
+        # Находим координаты самой фамилии, чтобы начать считать ПОСЛЕ неё
+        surname_end_x = 0
+        for w in words:
+            if target_surname in w['WordText'].lower():
+                surname_end_x = w['Left'] + w['Width']
+        
+        # Ширина всей области дней (примерно)
+        max_x = max([w['Left'] + w['Width'] for w in words])
+        table_width = max_x - surname_end_x
+        col_width = table_width / 31 if table_width > 0 else 1
+
+        for w in words:
+            word_text = w['WordText']
+            if target_surname in word_text.lower(): continue
+            
+            # Определяем номер дня по позиции X
+            relative_x = w['Left'] - surname_end_x
+            day_index = int(relative_x / col_width) + 1
+            if 1 <= day_index <= 31:
+                days_dict[day_index] = word_text
+
+        return create_calendar_visual(surname, days_dict)
+
     except Exception as e:
         return f"Ошибка: {e}"
 
 # --- БОТ ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("🗓 Пришли фото и фамилию!")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
@@ -112,12 +148,12 @@ async def handle_photo(message: types.Message):
         return
     
     surname = message.caption.strip()
-    wait_msg = await message.answer(f"⏳ Читаю таблицу для {surname}...")
+    wait_msg = await message.answer(f"⏳ Точный анализ таблицы для {surname}...")
     
     file = await bot.get_file(message.photo[-1].file_id)
     photo_file = await bot.download_file(file.file_path)
     
-    result = await process_ocr_table(photo_file.read(), surname)
+    result = await process_advanced_ocr(photo_file.read(), surname)
     await wait_msg.delete()
 
     if isinstance(result, io.BytesIO):
