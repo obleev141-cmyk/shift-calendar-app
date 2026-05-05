@@ -1,142 +1,98 @@
-import streamlit as st
+import asyncio
+import io
 import requests
 import re
-from datetime import date
 import calendar
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command
+from PIL import Image, ImageDraw
 
-# Настройки
-API_KEY = 'K81706642488957'
+# --- КОНФИГУРАЦИЯ ---
+TOKEN = "8646138607:AAFSSiamq4LQ3TWBOnxw5izNRDZkjgFusCY"
+OCR_API_KEY = "K81706642488957"
 
-# Стилизация под мобильное приложение (Dark Theme)
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+def create_calendar_visual(surname, raw_line):
+    year, month = 2026, 5
+    img_w, img_h = 1000, 1100
+    img = Image.new('RGB', (img_w, img_h), color=(33, 37, 43))
+    d = ImageDraw.Draw(img)
     
-    html, body, [data-testid="stAppViewContainer"] {
-        background-color: #1c1c1e;
-        color: white;
-        font-family: 'Roboto', sans-serif;
-    }
-    .stTextInput input, .stFileUploader section {
-        background-color: #2c2c2e !important;
-        border-radius: 15px !important;
-        color: white !important;
-        border: none !important;
-    }
-    .calendar-header {
-        font-size: 24px;
-        font-weight: 700;
-        margin-bottom: 20px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-    }
-    .grid-container {
-        display: grid;
-        grid-template-columns: repeat(7, 1fr);
-        gap: 8px;
-        text-align: center;
-    }
-    .weekday-label {
-        color: #8e8e93;
-        font-size: 12px;
-        text-transform: uppercase;
-        margin-bottom: 10px;
-    }
-    .day-cell {
-        background-color: #2c2c2e;
-        border-radius: 12px;
-        padding: 8px 4px;
-        min-height: 70px;
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-        font-size: 14px;
-        position: relative;
-    }
-    .day-num { font-weight: 500; text-align: left; margin-left: 5px; }
+    d.text((430, 40), "МАЙ 2026", fill=(255, 255, 255))
+    d.text((60, 90), f"СОТРУДНИК: {surname.upper()}", fill=(200, 200, 200))
+
+    days_ru = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
+    cell_size = 125
+    start_x, start_y = 65, 200
+
+    for i, day in enumerate(days_ru):
+        d.text((start_x + i * cell_size + 40, start_y - 50), day, fill=(150, 150, 150))
+
+    # Извлекаем данные (время или "ОТ")
+    parts = re.findall(r'(\d{1,2}[:\-\s]*\d{0,2}|ОТ)', raw_line[len(surname):])
+    clean_data = [x.strip() for x in parts if x.strip()]
+
+    cal_structure = calendar.monthcalendar(year, month)
     
-    /* Твой запрос: зеленый для выходных */
-    .weekend { background-color: #2e4d2e !important; }
-    
-    /* Цвета для смен */
-    .shift-9 { background-color: #f8b08e !important; color: #1c1c1e !important; }
-    .shift-12 { background-color: #a8e0a8 !important; color: #1c1c1e !important; }
-    .shift-10 { background-color: #f8a0a0 !important; color: #1c1c1e !important; }
-    .shift-11 { background-color: #d1d1d6 !important; color: #1c1c1e !important; }
-    
-    .shift-info {
-        font-size: 10px;
-        font-weight: 700;
-        background: rgba(0,0,0,0.1);
-        border-radius: 4px;
-        margin-top: 5px;
-    }
-</style>
-""", unsafe_allow_html=True)
+    for r_idx, week in enumerate(cal_structure):
+        for c_idx, day_num in enumerate(week):
+            if day_num == 0: continue
+            
+            x = start_x + c_idx * cell_size
+            y = start_y + r_idx * (cell_size + 15)
+            
+            # --- НОВАЯ ЛОГИКА ЦВЕТОВ ---
+            # По умолчанию выходной - ЗЕЛЕНЫЙ
+            bg_color = (60, 140, 85) 
+            shift_info = ""
 
-st.write('<div class="calendar-header">май 2026 г. <span>+</span></div>', unsafe_allow_html=True)
+            if (day_num - 1) < len(clean_data):
+                val = clean_data[day_num - 1]
+                if "ОТ" in val.upper():
+                    bg_color = (180, 70, 70) # Красный для отпуска
+                    shift_info = "ОТПУСК"
+                elif re.search(r'\d', val):
+                    # Рабочий день - ОРАНЖЕВЫЙ
+                    bg_color = (255, 140, 0) 
+                    shift_info = val.replace(" ", "")
 
-surname = st.text_input("Фамилия", placeholder="Введите для поиска...")
-uploaded_file = st.file_uploader("Загрузить график", type=["jpg", "png", "jpeg"])
+            # Рисуем ячейку
+            d.rectangle([x, y, x + cell_size - 12, y + cell_size - 12], fill=bg_color)
+            d.text((x + 10, y + 10), str(day_num), fill=(255, 255, 255))
+            
+            # Текст смены (жирный шрифт наложением)
+            if shift_info:
+                txt = f"с {shift_info}" if len(shift_info) < 6 else shift_info
+                tx, ty = x + 15, y + 55
+                for off_x in range(2):
+                    for off_y in range(2):
+                        d.text((tx + off_x, ty + off_y), txt, fill=(255, 255, 255))
 
-if uploaded_file and surname:
-    with st.spinner("Анализирую таблицу..."):
-        # OCR запрос
-        files = {"f": uploaded_file.getvalue()}
-        data = {"apikey": API_KEY, "language": "rus", "isTable": True, "OCREngine": 2}
-        res = requests.post("https://api.ocr.space/parse/image", files=files, data=data)
-        result = res.json()
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
 
-        shifts_found = {}
-        if result.get("OCRExitCode") == 1:
-            text = result["ParsedResults"][0]["ParsedText"]
-            lines = text.split('\r\n')
-            for line in lines:
-                if surname.lower() in line.lower():
-                    # Ищем смены типа 09-22
-                    all_shifts = re.findall(r'\d{1,2}-\d{2}', line)
-                    for i, s in enumerate(all_shifts):
-                        shifts_found[i+1] = s # Привязка к дням
+def get_schedule_from_cloud(image_bytes, surname):
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        img.thumbnail((2000, 2000))
+        c_buf = io.BytesIO()
+        img.save(c_buf, format='JPEG', quality=95)
+
+        payload = {'apikey': OCR_API_KEY, 'language': 'rus', 'isTable': 'true', 'OCREngine': '2'}
+        files = {'file': ('img.jpg', c_buf.getvalue(), 'image/jpeg')}
+        r = requests.post('https://api.ocr.space/parse/image', files=files, data=payload, timeout=60).json()
         
-        # Рисуем календарь
-        st.write('<div class="grid-container">', unsafe_allow_html=True)
-        for wd in ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]:
-            st.write(f'<div class="weekday-label">{wd}</div>', unsafe_allow_html=True)
-        
-        # Май 2026 начинается с пятницы (индекс 4)
-        month_cal = calendar.monthcalendar(2026, 5)
-        
-        for week in month_cal:
-            for i, day in enumerate(week):
-                if day == 0:
-                    st.write('<div></div>', unsafe_allow_html=True)
-                else:
-                    is_weekend = i >= 5
-                    shift = shifts_found.get(day, "")
-                    
-                    # Определяем класс цвета
-                    style_class = "day-cell"
-                    if is_weekend: style_class += " weekend"
-                    
-                    shift_text = ""
-                    if shift:
-                        start_time = shift.split('-')[0]
-                        shift_text = f'<div class="shift-info">с {start_time}</div>'
-                        if "09" in start_time: style_class += " shift-9"
-                        elif "12" in start_time: style_class += " shift-12"
-                        elif "10" in start_time: style_class += " shift-10"
-                        elif "11" in start_time: style_class += " shift-11"
+        if r.get('OCRExitCode') != 1:
+            return f"Ошибка OCR: {r.get('ErrorMessage')}"
 
-                    html = f'''
-                    <div class="{style_class}">
-                        <div class="day-num">{day}</div>
-                        {shift_text}
-                    </div>
-                    '''
-                    st.write(html, unsafe_allow_html=True)
-        st.write('</div>', unsafe_allow_html=True)
-else:
-    st.info("Загрузите фото, чтобы увидеть ваш персональный график.")
-
-st.markdown('<br><div style="text-align:center; color:#8e8e93; font-size:12px;">Poco X5 Pro Edition</div>', unsafe_allow_html=True)
+        parsed_text = r['ParsedResults'][0]['ParsedText']
+        lines = parsed_text.split('\r\n')
+        
+        target = surname.strip().lower()
+        for line in lines:
+            if target in line.lower():
+                return create_calendar_visual(surname, line)
